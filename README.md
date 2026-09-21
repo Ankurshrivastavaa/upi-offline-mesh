@@ -1,405 +1,176 @@
+<div align="center">
+
 # UPI Offline Mesh
 
-> **Mesh-Routed Deferred Payment Settlement**
+**Mesh-Routed Deferred Payment Settlement**
 
-A Java 17 + Spring Boot simulation of an offline payment system where payment packets propagate through a device mesh and are later uploaded by bridge devices for secure, idempotent settlement.
+A backend simulation of offline-first payment settlement — payments propagate through a peer-to-peer device mesh and are settled exactly once, no matter how many paths they arrive through.
 
-**Live Demo:** https://upi-offline-mesh-nvgy.onrender.com
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-View%20App-success?style=for-the-badge)](https://upi-offline-mesh-nvgy.onrender.com)
 
-**GitHub:** https://github.com/Ankurshrivastavaa/upi-offline-mesh
+[![Java](https://img.shields.io/badge/Java-17-ED8B00?style=flat-square&logo=openjdk&logoColor=white)](https://openjdk.org/)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.3-6DB33F?style=flat-square&logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
+[![Docker](https://img.shields.io/badge/Docker-Containerized-2496ED?style=flat-square&logo=docker&logoColor=white)](https://www.docker.com/)
+![Security](https://img.shields.io/badge/Security-Hybrid%20Encryption-6f42c1?style=flat-square)
+[![Render](https://img.shields.io/badge/Deployed-Render-46E3B7?style=flat-square&logo=render&logoColor=white)](https://upi-offline-mesh-nvgy.onrender.com)
 
----
+**Source:** [github.com/Ankurshrivastavaa/upi-offline-mesh](https://github.com/Ankurshrivastavaa/upi-offline-mesh) · **LinkedIn:** [Ankur Shrivastava](https://www.linkedin.com/in/ankur-shrivastava-65184724b/)
 
-## 📌 Project Overview
-
-In areas with unreliable or unavailable internet connectivity, a payment may not be immediately deliverable to a backend server.
-
-This project demonstrates a **mesh-routed deferred settlement model**:
-
-1. A payment is created on an offline device.
-2. The payment is encrypted into a packet.
-3. The packet propagates between simulated devices.
-4. Bridge devices eventually obtain the packet.
-5. A bridge uploads the packet to the backend.
-6. The backend validates, decrypts, deduplicates, and settles the payment.
-
-The project focuses on the backend engineering problems involved in securely processing the same payment packet when it may arrive through multiple paths.
-
-> **Important:** This is a software simulation. It does not integrate with real UPI, NPCI, banks, Bluetooth hardware, or real payment infrastructure.
+</div>
 
 ---
 
-## 🎯 Engineering Problems Solved
+> **Scope note:** this is a backend engineering simulation, not a production payment product. It does not connect to real UPI, NPCI, banks, or Bluetooth/BLE hardware — the mesh is simulated in software. Everything else described below (encryption, idempotency, settlement logic) is real, working backend code.
 
-The project focuses on four main backend problems:
+## Overview
 
-### 1. Secure Payment Transmission
+In areas with unreliable connectivity, a payment can't always reach a server the moment it's created. This project simulates what happens next: a payment is made offline, encrypted into a packet, and gossiped device-to-device through a mesh until a connected "bridge" device uploads it.
 
-Payment information must remain protected while packets travel through untrusted intermediary devices.
+The interesting problem isn't the mesh — it's the backend. **The same encrypted packet can reach the server from two or three different bridges at once.** It has to be verified as untampered, checked for staleness, and settled — *exactly once* — no matter how many times or in what order copies of it show up.
 
-### 2. Duplicate Delivery
+## Why It's Interesting
 
-The same packet may reach the backend through multiple bridge devices.
+| Challenge | Solution |
+|---|---|
+| Same packet delivered by multiple bridges simultaneously | SHA-256 packet hash + atomic `ConcurrentHashMap.putIfAbsent`, backed by a DB-level unique constraint |
+| Payment data exposed on untrusted intermediary devices | Hybrid encryption — AES-256-GCM for the payload, RSA-OAEP to protect the AES key |
+| Ciphertext modified in transit | AES-GCM's built-in authentication tag — tampering makes decryption fail outright |
+| Old packets replayed later | Timestamp-based freshness window, checked before decryption |
+| Two settlements racing on the same account | JPA optimistic locking (`@Version`) catches conflicting concurrent writes |
+| A settlement failing partway through | `@Transactional` — debit, credit, and ledger entry commit or roll back as one unit |
 
-The backend must prevent the same payment from being settled more than once.
+## Skills This Project Demonstrates
 
-### 3. Packet Tampering
+- **Applied cryptography** — hybrid RSA-OAEP + AES-256-GCM encryption, authenticated encryption, SHA-256 hashing
+- **Distributed systems thinking** — idempotent processing over unreliable, multi-path delivery
+- **Concurrency control** — atomic operations, optimistic locking, race-condition-aware design
+- **Data integrity** — transactional settlement with rollback guarantees
+- **API design** — layered REST architecture (controller → service → model)
+- **Testing discipline** — tests targeting security and concurrency edge cases, not just the happy path
+- **Containerization & deployment** — Dockerized Spring Boot app, deployed to Render
 
-An intermediary should not be able to modify the encrypted payment data without detection.
+## Architecture
 
-### 4. Replay / Stale Packets
+### System Flow
 
-Old packets should not remain valid indefinitely.
+```mermaid
+flowchart LR
+    A["Sender Device<br/>(phone-alice)"] -->|encrypted packet| B["Mesh Network<br/>gossip forwarding"]
+    B --> C1["phone-bob"]
+    B --> C2["bridge-1"]
+    B --> C3["bridge-2"]
+    C2 -->|upload| D["Spring Boot API"]
+    C3 -->|upload| D
+    D --> E{"Hash + idempotency check<br/>Freshness check<br/>AES-GCM decrypt"}
+    E -->|valid + new| F[("H2 Ledger")]
+    E -->|duplicate / stale / tampered| G["Rejected"]
+```
 
----
+### Handling Duplicate Delivery
 
-# 🏗️ Architecture
+```mermaid
+sequenceDiagram
+    participant B1 as Bridge 1
+    participant B2 as Bridge 2
+    participant B3 as Bridge 3
+    participant API as Backend
+    participant L as Ledger
+
+    B1->>API: upload packet (hash X)
+    B2->>API: upload packet (hash X)
+    B3->>API: upload packet (hash X)
+    Note over API: putIfAbsent(hash X) - only one wins
+    API->>L: settle once
+    API-->>B1: settled
+    API-->>B2: duplicate - skipped
+    API-->>B3: duplicate - skipped
+```
+
+> **Try it in the live demo:** send ₹500 from `alice@demo` to `bob@demo`, run mesh gossip, then flush multiple bridges. The dashboard shows `SETTLED ₹500 from alice@demo to bob@demo` once — every later delivery of that same packet logs `Duplicate packet detected — settlement skipped`.
+
+## Security & Cryptography
+
+Payment data uses **hybrid encryption**, the same general pattern behind TLS and most encrypted messaging:
+
+1. A random AES key is generated per payment and encrypts the payload with **AES-256-GCM** — fast, and authenticated, so any tampering breaks decryption.
+2. That AES key is itself encrypted with the server's public key using **RSA-OAEP**, so only the backend can recover it.
+3. The resulting packet is hashed with **SHA-256** — that hash becomes the idempotency key used to catch duplicates.
+
+This sidesteps RSA's main weakness (slow, size-limited) while keeping its benefit: no shared secret has to exist ahead of time on an untrusted device.
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Language | Java 17 |
+| Framework | Spring Boot 3.3 |
+| Build | Maven |
+| Persistence | Spring Data JPA / Hibernate, H2 |
+| Security | RSA-OAEP, AES-256-GCM, SHA-256 |
+| Concurrency | `ConcurrentHashMap`, JPA optimistic locking |
+| Validation | Jakarta Validation |
+| Testing | JUnit, Spring Boot Test |
+| Deployment | Docker, Render |
+
+## REST API Reference
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /` | Dashboard |
+| `GET /api/server-key` | Get server public key |
+| `GET /api/accounts` | View demo accounts |
+| `GET /api/transactions` | View transactions |
+| `GET /api/mesh/state` | View mesh state |
+| `POST /api/demo/send` | Create a demo payment |
+| `POST /api/mesh/gossip` | Run mesh gossip propagation |
+| `POST /api/mesh/flush` | Flush bridge packets |
+| `POST /api/mesh/reset` | Reset demo state |
+| `POST /api/bridge/ingest` | Ingest a bridge packet |
+| `/h2-console` | H2 database console |
+
+## Testing
+
+The test suite specifically targets the failure modes above, not just the happy path:
+
+- **Encryption round-trip** — data encrypted then decrypted matches the original
+- **Tampered ciphertext** — modified packets are rejected at decryption
+- **Duplicate bridge delivery** — the same packet uploaded by multiple bridges produces exactly one settlement
+
+## Getting Started
+
+<details>
+<summary>Run locally or with Docker</summary>
+
+**Requirements:** Java 17+, Maven, Git
+
+```bash
+git clone https://github.com/Ankurshrivastavaa/upi-offline-mesh.git
+cd upi-offline-mesh
+
+# Windows
+mvnw.cmd spring-boot:run
+
+# Linux / macOS
+./mvnw spring-boot:run
+```
+
+App runs at `http://localhost:8080`.
+
+**Or with Docker:**
+
+```bash
+docker build -t upi-offline-mesh .
+docker run -p 8080:8080 upi-offline-mesh
+```
+
+</details>
+
+## Project Structure
+
+<details>
+<summary>Show file tree</summary>
 
 ```text
-                    OFFLINE MESH
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │   Sender Device     │
-              │    phone-alice      │
-              └──────────┬──────────┘
-                         │
-                    Encrypted Packet
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │   Mesh Devices      │
-              │                     │
-              │ phone-bob           │
-              │ phone-carol         │
-              │ bridge-1            │
-              │ bridge-2            │
-              └──────────┬──────────┘
-                         │
-                    Gossip Forwarding
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │   Bridge Devices    │
-              └──────────┬──────────┘
-                         │
-                    Upload Packet
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │   Spring Boot API   │
-              │                     │
-              │ Hash / Idempotency  │
-              │ Freshness Check     │
-              │ Decryption          │
-              │ Settlement          │
-              └──────────┬──────────┘
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │      H2 Ledger      │
-              │                     │
-              │ Sender Debit        │
-              │ Receiver Credit     │
-              │ Transaction Record  │
-              └─────────────────────┘
-
-
-
-              🔄 End-to-End Flow
-Payment Created
-      │
-      ▼
-Payment Instruction
-      │
-      ▼
-Hybrid Encryption
-(RSA-OAEP + AES-256-GCM)
-      │
-      ▼
-Mesh Packet Created
-      │
-      ▼
-Gossip Propagation
-      │
-      ▼
-Multiple Bridges Receive Packet
-      │
-      ▼
-Bridge Upload
-      │
-      ▼
-SHA-256 Packet Hash
-      │
-      ▼
-Idempotency Check
-      │
-      ▼
-Freshness Validation
-      │
-      ▼
-AES-GCM Decryption
-      │
-      ▼
-Transactional Settlement
-      │
-      ▼
-Sender Debited
-Receiver Credited
-Transaction Recorded
-🔐 Security Architecture
-
-The project uses hybrid encryption to protect payment packets.
-
-Encryption Flow
-Payment Data
-     │
-     ▼
-Generate AES Key
-     │
-     ▼
-AES-256-GCM Encryption
-     │
-     ▼
-Encrypt AES Key
-using RSA-OAEP
-     │
-     ▼
-Encrypted Payment Packet
-RSA-OAEP
-
-RSA is used to securely protect the randomly generated AES key.
-
-AES-256-GCM
-
-AES-GCM encrypts the actual payment data and provides authenticated encryption.
-
-This means that modification of the ciphertext can be detected during decryption.
-
-SHA-256
-
-The encrypted packet is hashed using SHA-256.
-
-Encrypted Packet
-       │
-       ▼
-     SHA-256
-       │
-       ▼
-Packet Hash
-
-The hash is used as an idempotency key for duplicate detection.
-
-♻️ Idempotency & Concurrency
-
-One of the main engineering challenges is handling the same packet arriving through multiple bridges.
-
-For example:
-
-             ┌── Bridge 1 ──┐
-             │              │
-Sender ──────┼── Bridge 2 ──┼──► Backend
-             │              │
-             └── Bridge 3 ──┘
-
-All three bridges may upload the same encrypted packet.
-
-The backend calculates a deterministic SHA-256 hash of the packet.
-
-A concurrent idempotency check is then performed using:
-
-putIfAbsent(packetHash, value)
-
-ConcurrentHashMap.putIfAbsent() provides an atomic check-and-insert operation.
-
-Conceptually:
-
-if (processedPackets.putIfAbsent(packetHash, true) != null) {
-
-    // Packet was already processed
-
-    return;
-}
-
-// First processing attempt continues
-
-This prevents concurrent duplicate requests from independently reaching the settlement logic.
-
-The database also contains a unique constraint on the packet hash as an additional defense.
-
-🛡️ Replay & Tamper Detection
-
-The backend performs validation before settlement.
-
-Freshness Validation
-
-Packets contain a timestamp.
-
-The backend checks whether the packet is still within the accepted freshness window.
-
-Packet Timestamp
-       │
-       ▼
-Freshness Check
-       │
-   ┌───┴────┐
-   │        │
- Valid    Expired
-   │        │
-   ▼        ▼
-Continue   Reject
-Tamper Detection
-
-AES-GCM authentication detects modifications to encrypted packet data.
-
-If the ciphertext has been modified:
-
-Modified Ciphertext
-        │
-        ▼
-AES-GCM Decryption
-        │
-        ▼
-Authentication Failure
-        │
-        ▼
-Packet Rejected
-💰 Transaction Settlement
-
-After validation and successful decryption, the payment is settled transactionally.
-
-The settlement process performs:
-
-1. Find sender account
-2. Find receiver account
-3. Debit sender
-4. Credit receiver
-5. Create transaction record
-
-The settlement service uses Spring's:
-
-@Transactional
-
-This ensures the settlement operations execute as one database transaction.
-
-If the transaction fails, the database changes can be rolled back instead of leaving a partially completed settlement.
-
-🔒 Optimistic Locking
-
-Account entities use optimistic locking with:
-
-@Version
-
-This helps detect conflicting concurrent updates to account records.
-
-Conceptually:
-
-Transaction A ──► Account Version 1
-                       │
-Transaction B ──► Account Version 1
-                       │
-                       ▼
-                 Concurrent Update
-                       │
-                       ▼
-               Version Conflict
-
-This adds another layer of protection when multiple settlement operations attempt to update the same account.
-
-🧪 Testing
-
-The project includes tests covering important security and concurrency scenarios.
-
-Encryption / Decryption
-
-Tests that encrypted payment data can successfully be decrypted back into the original data.
-
-Tampered Ciphertext
-
-Tests that modified encrypted data is rejected.
-
-Duplicate Bridge Delivery
-
-Tests that the same payment packet delivered by multiple bridge devices does not result in multiple settlements.
-
-Example scenario:
-
-Bridge 1 ──────┐
-Bridge 2 ──────┼──► Same Packet
-Bridge 3 ──────┘
-                    │
-                    ▼
-              Idempotency Check
-                    │
-                    ▼
-             Single Settlement
-🧩 Demo Workflow
-
-The application includes a simulated mesh environment.
-
-A typical demonstration looks like:
-
-phone-alice
-     │
-     │ Payment: ₹500
-     ▼
-Mesh Gossip
-     │
-     ├────► phone-bob
-     │
-     ├────► bridge-1
-     │
-     └────► bridge-2
-              │
-              ▼
-        Backend Ingestion
-              │
-              ▼
-        Security Checks
-              │
-              ▼
-          Settlement
-
-Example result:
-
-SETTLED ₹500 from alice@demo to bob@demo
-
-If the same packet is received again:
-
-Duplicate packet detected
-        │
-        ▼
-Settlement skipped
-🛠️ Tech Stack
-Category	Technology
-Language	Java 17
-Framework	Spring Boot 3.3
-Build Tool	Maven
-Web	Spring Web
-Database	H2
-ORM	Spring Data JPA / Hibernate
-Encryption	RSA-OAEP + AES-256-GCM
-Hashing	SHA-256
-Concurrency	ConcurrentHashMap
-Validation	Jakarta Validation
-Testing	JUnit / Spring Boot Test
-Containerization	Docker
-Deployment	Render
-📁 Project Structure
-src/
-├── main/
-│   ├── java/
-│   │   └── ...
-│   │
-│   └── resources/
-│       ├── application.properties
-│       └── templates/
-│
-└── test/
-    └── java/
-
-Main backend components include:
-
 model/
 ├── Account.java
 ├── Transaction.java
@@ -424,242 +195,39 @@ controller/
 
 config/
 └── AppConfig.java
-🌐 REST API
-Endpoint	Purpose
-GET /	Dashboard
-GET /api/server-key	Get server public key
-GET /api/accounts	View demo accounts
-GET /api/transactions	View transactions
-GET /api/mesh/state	View mesh state
-POST /api/demo/send	Create demo payment
-POST /api/mesh/gossip	Run mesh gossip
-POST /api/mesh/flush	Flush bridge packets
-POST /api/mesh/reset	Reset demo state
-POST /api/bridge/ingest	Ingest bridge packet
-/h2-console	H2 database console
-🚀 Run Locally
-Requirements
+```
 
-Make sure you have:
+</details>
 
-Java 17+
-Maven
-Git
+## Limitations
 
-Clone the repository:
+This is a backend simulation built to demonstrate specific engineering problems, not a production system — called out here rather than glossed over:
 
-git clone https://github.com/Ankurshrivastavaa/upi-offline-mesh.git
+- **Mesh is simulated in software** — no real Bluetooth/BLE, Wi-Fi Direct, or Nearby Connections
+- **H2 is in-memory** — state resets on restart
+- **Idempotency store is in-process** — a distributed deployment would need Redis or a DB-backed store
+- **RSA keys are generated at startup** — no secure key storage or rotation
+- **No production auth, authorization, or rate limiting**
+- **No connection to real UPI, NPCI, banks, or payment gateways**
 
-Move into the project:
+## Roadmap
 
-cd upi-offline-mesh
+| Current | Production Direction |
+|---|---|
+| H2 | PostgreSQL |
+| In-memory `ConcurrentHashMap` | Redis / distributed idempotency store |
+| Simulated mesh | Real BLE / Wi-Fi Direct / Nearby networking |
+| Startup-generated keys | KMS-backed key management |
+| Basic API | Auth, rate limiting, monitoring, audit logging |
 
-Run the application:
+## Author
 
-Windows
-mvnw.cmd spring-boot:run
-Linux / macOS
-./mvnw spring-boot:run
-
-The application will start on:
-
-http://localhost:8080
-🐳 Run with Docker
-
-Build the Docker image:
-
-docker build -t upi-offline-mesh .
-
-Run the container:
-
-docker run -p 8080:8080 upi-offline-mesh
-
-Open:
-
-http://localhost:8080
-☁️ Deployment
-
-The application is containerized using Docker and deployed on Render.
-
-Deployment flow:
-
-GitHub
-   │
-   ▼
-Render
-   │
-   ▼
-Docker Build
-   │
-   ▼
-Java 17 Container
-   │
-   ▼
-Spring Boot Application
-Live Application
-
-https://upi-offline-mesh-nvgy.onrender.com
-
-📊 Engineering Highlights
-Secure Data Handling
-RSA-OAEP key protection
-AES-256-GCM authenticated encryption
-SHA-256 packet hashing
-Freshness validation
-Tamper detection
-Concurrency
-Atomic ConcurrentHashMap.putIfAbsent
-Database uniqueness constraint
-JPA optimistic locking
-Transaction Integrity
-Spring @Transactional
-Atomic sender debit / receiver credit
-Transaction ledger
-Backend Architecture
-Layered Spring Boot architecture
-REST APIs
-Service-oriented business logic
-JPA persistence
-Automated tests
-Deployment
-Dockerized application
-Java 17 runtime
-Maven build
-Render deployment
-⚠️ Current Limitations
-
-This project is intentionally a backend simulation and has several limitations.
-
-Simulated Mesh
-
-The mesh is implemented in software.
-
-It does not currently communicate using:
-
-Bluetooth
-BLE
-Wi-Fi Direct
-Nearby Connections
-Database
-
-The application currently uses an H2 in-memory database.
-
-Restarting the application resets the database state.
-
-Idempotency Storage
-
-The in-memory ConcurrentHashMap is suitable for demonstrating concurrency and duplicate prevention within the running application.
-
-A distributed production deployment would require shared durable state such as Redis or a database-backed idempotency mechanism.
-
-Cryptographic Keys
-
-The RSA keypair is generated when the application starts.
-
-A production system would require secure key storage and key rotation.
-
-Authentication
-
-The demo does not implement production-grade user authentication, authorization, or rate limiting.
-
-Real Payment Infrastructure
-
-The project does not connect to:
-
-UPI
-NPCI
-Banks
-Payment gateways
-Real payment accounts
-🔮 Possible Production Evolution
-
-If this architecture were extended toward a production system, potential improvements would include:
-
-H2
- │
- ▼
-PostgreSQL
-
-ConcurrentHashMap
- │
- ▼
-Redis / Distributed Idempotency Store
-
-Simulated Mesh
- │
- ▼
-BLE / Wi-Fi Direct / Nearby Networking
-
-Generated Keys
- │
- ▼
-Secure Key Management / KMS
-
-Basic API
- │
- ▼
-Authentication + Authorization
-+ Rate Limiting
-+ Monitoring
-+ Audit Logging
-
-These are future architectural directions rather than features currently implemented in the project.
-
-🧠 Key Learnings
-
-This project helped explore practical backend engineering concepts including:
-
-Hybrid cryptography
-AES-GCM authenticated encryption
-RSA-OAEP
-SHA-256 hashing
-Idempotent API processing
-Concurrent request handling
-Optimistic locking
-Database transactions
-JPA entity relationships
-REST API design
-Spring Boot service architecture
-Automated testing
-Docker containerization
-Cloud deployment
-
-The main takeaway is that handling a payment request is not only about moving data from one API to another.
-
-A reliable payment-processing backend also needs to consider:
-
-Security
-   +
-Concurrency
-   +
-Idempotency
-   +
-Transaction Integrity
-   +
-Failure Handling
-👨‍💻 Author
-Ankur Shrivastava
-
-B.Tech Computer Science with Business Systems
-
-School of Information Technology, RGPV
-
+**Ankur Shrivastava**<br/>
+B.Tech, Computer Science with Business Systems — School of Information Technology, RGPV<br/>
 Bhopal, Madhya Pradesh, India
 
-Links
+[GitHub](https://github.com/Ankurshrivastavaa) · [LinkedIn](https://www.linkedin.com/in/ankur-shrivastava-65184724b/) · [Project Repo](https://github.com/Ankurshrivastavaa/upi-offline-mesh)
 
-GitHub:
-https://github.com/Ankurshrivastavaa
+---
 
-LinkedIn:
-https://www.linkedin.com/in/ankur-shrivastava-65184724b/
-
-⭐ Project
-
-If you found the project interesting, feel free to explore the repository and the implementation.
-
-GitHub:
-https://github.com/Ankurshrivastavaa/upi-offline-mesh
-
-Live Demo:
-https://upi-offline-mesh-nvgy.onrender.com
+<div align="center"><sub>Thanks for reading — reach out on LinkedIn or explore more projects on GitHub.</sub></div>
